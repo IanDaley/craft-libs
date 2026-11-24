@@ -20,6 +20,7 @@ impl Filter {
     }
 
     /// The patterns to hand rfd on this platform.
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn patterns(&self) -> Vec<String> {
         patterns(&self.extensions, cfg!(all(unix, not(target_vendor = "apple"))))
     }
@@ -29,6 +30,7 @@ impl Filter {
 /// case. With `globs` (rfd formats each pattern as `*.{pattern}`): the lower-case form, the
 /// upper-case form (for a portal backend without `[...]` classes) and a class per letter, such as
 /// `[nN][eE][fF]`, that matches every mix.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn patterns(extensions: &[String], globs: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |s: String| {

@@ -1,12 +1,12 @@
 //! Native dialogs through rfd's async dialogs, with a worker thread that waits for the answer.
 //!
 //! How rfd 0.17.2 shows a dialog (from its source):
-//! - macOS: creating the future begins the panel, so it happens here on the main thread. The async
-//!   path is always a sheet: on the parent's window, else the app's main or first window
+//! - macOS: Open, Folder and Save don't go through rfd at all: see [`crate::macos`]. A message box
+//!   does, and creating its future begins the sheet, so it happens here on the main thread. The
+//!   async path is always a sheet: on the parent's window, else the app's main or first window
 //!   (`backend/macos/modal_future.rs:71-75`). Without a running app and a window it falls back to
 //!   the blocking `runModal` (`modal_future.rs:79-118`), the crash this crate exists to avoid, so
-//!   a sheet starts only with a parent in a running app ([`crate::macos::sheet_parent`]). Open and
-//!   Folder don't go through rfd at all on macOS: see [`crate::macos`].
+//!   a sheet starts only with a parent in a running app ([`crate::macos::sheet_parent`]).
 //! - Windows: the dialog runs on a thread rfd starts when the worker first polls the future.
 //! - Linux and the BSDs: the desktop portal (zenity as a fallback) works when the worker polls the
 //!   future; rfd's optional GTK3 backend runs on rfd's own GTK thread. A portal that cannot show
@@ -63,70 +63,72 @@ pub(crate) fn show<W: HasWindowHandle + HasDisplayHandle>(request: Request, pare
 
 fn show_file<W: HasWindowHandle + HasDisplayHandle>(d: FileDialog, parent: Option<&W>, reply: Reply) -> Shown {
     #[cfg(target_os = "macos")]
-    let parent = match d.kind {
-        Kind::Open { .. } | Kind::Folder => return Shown { panel: crate::macos::show_panel(&d, reply) },
-        Kind::Save => match crate::macos::sheet_parent(parent) {
-            Ok(parent) => Some(parent),
-            Err(why) => {
-                reply.send(Answer::Unavailable(why));
-                return Shown::default();
-            }
-        },
-    };
-    let mut dialog = rfd::AsyncFileDialog::new();
-    if let Some(title) = &d.title {
-        dialog = dialog.set_title(title);
-    }
-    for filter in &d.filters {
-        dialog = dialog.add_filter(&filter.name, &filter.patterns());
-    }
-    if let Some(directory) = &d.directory {
-        dialog = dialog.set_directory(directory);
-    }
-    if let Some(name) = &d.file_name {
-        dialog = dialog.set_file_name(name);
-    }
-    // The same dialog without a parent: a dialog that closed at once is asked again with it.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))]
-    let bare = dialog.clone();
-    if let Some(parent) = parent {
-        dialog = dialog.set_parent(parent);
-    }
-    // The worker first, so a dialog once shown always has somewhere to answer.
-    let Some(worker) = worker(reply) else { return Shown::default() };
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))]
-    let (pending, shown): (Pending, Shown) = match d.kind {
-        // The portal's own Save dialog, which reports the file type picked; rfd's when the portal
-        // can't show it.
-        Kind::Save => {
-            let parent_id = crate::portal::parent_id(parent.and_then(|p| p.window_handle().ok()).map(|h| h.as_raw()));
-            let request = crate::portal::SaveRequest::new(&d, parent_id);
-            let cancel = crate::portal::Cancel::default();
-            let shown = Shown { cancel: Some(cancel.clone()) };
-            let pending: Pending = Box::pin(async move {
-                match crate::portal::save_as(request, &cancel) {
-                    crate::portal::SaveOutcome::Saved(path, filter) => Answer::Saved { path, filter },
-                    crate::portal::SaveOutcome::Cancelled => Answer::Cancelled,
-                    crate::portal::SaveOutcome::Unavailable(why) => Answer::Unavailable(why),
-                    crate::portal::SaveOutcome::UseRfd(why) => {
-                        log::info!("portal save dialog unavailable ({why}), using rfd");
-                        retried(dialog, bare, Kind::Save).await
-                    }
-                }
-            });
-            (pending, shown)
+    {
+        // Free-standing panels, as native apps show them. rfd's sheet never appeared on macOS 27,
+        // so Save no longer asks it.
+        let _ = parent;
+        match d.kind {
+            Kind::Open { .. } | Kind::Folder => Shown { panel: crate::macos::show_panel(&d, reply) },
+            Kind::Save => Shown { panel: crate::macos::show_save_panel(&d, reply) },
         }
-        kind => (retried(dialog, bare, kind), Shown::default()),
-    };
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd")))]
-    let (pending, shown) = (rfd_pick(dialog, d.kind), Shown::default());
-    // The worker can't be gone: it waits for this. If it were, its reply answers Unavailable.
-    let _ = worker.send(pending);
-    shown
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut dialog = rfd::AsyncFileDialog::new();
+        if let Some(title) = &d.title {
+            dialog = dialog.set_title(title);
+        }
+        for filter in &d.filters {
+            dialog = dialog.add_filter(&filter.name, &filter.patterns());
+        }
+        if let Some(directory) = &d.directory {
+            dialog = dialog.set_directory(directory);
+        }
+        if let Some(name) = &d.file_name {
+            dialog = dialog.set_file_name(name);
+        }
+        // The same dialog without a parent: a dialog that closed at once is asked again with it.
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))]
+        let bare = dialog.clone();
+        if let Some(parent) = parent {
+            dialog = dialog.set_parent(parent);
+        }
+        // The worker first, so a dialog once shown always has somewhere to answer.
+        let Some(worker) = worker(reply) else { return Shown::default() };
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))]
+        let (pending, shown): (Pending, Shown) = match d.kind {
+            // The portal's own Save dialog, which reports the file type picked; rfd's when the portal
+            // can't show it.
+            Kind::Save => {
+                let parent_id = crate::portal::parent_id(parent.and_then(|p| p.window_handle().ok()).map(|h| h.as_raw()));
+                let request = crate::portal::SaveRequest::new(&d, parent_id);
+                let cancel = crate::portal::Cancel::default();
+                let shown = Shown { cancel: Some(cancel.clone()) };
+                let pending: Pending = Box::pin(async move {
+                    match crate::portal::save_as(request, &cancel) {
+                        crate::portal::SaveOutcome::Saved(path, filter) => Answer::Saved { path, filter },
+                        crate::portal::SaveOutcome::Cancelled => Answer::Cancelled,
+                        crate::portal::SaveOutcome::Unavailable(why) => Answer::Unavailable(why),
+                        crate::portal::SaveOutcome::UseRfd(why) => {
+                            log::info!("portal save dialog unavailable ({why}), using rfd");
+                            retried(dialog, bare, Kind::Save).await
+                        }
+                    }
+                });
+                (pending, shown)
+            }
+            kind => (retried(dialog, bare, kind), Shown::default()),
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd")))]
+        let (pending, shown) = (rfd_pick(dialog, d.kind), Shown::default());
+        // The worker can't be gone: it waits for this. If it were, its reply answers Unavailable.
+        let _ = worker.send(pending);
+        return shown;
+    }
 }
 
-/// rfd's dialog of `kind`, as an answer. On macOS creating the future shows the dialog, so this
-/// runs where the dialog is to show.
+/// rfd's dialog of `kind`, as an answer.
+#[cfg(not(target_os = "macos"))]
 fn rfd_pick(dialog: rfd::AsyncFileDialog, kind: Kind) -> Pending {
     let one = |file: Option<rfd::FileHandle>| file.map_or(Answer::Cancelled, |f| Answer::Paths(vec![f.path().to_path_buf()]));
     let saved = |file: Option<rfd::FileHandle>| file.map_or(Answer::Cancelled, |f| Answer::Saved { path: f.path().to_path_buf(), filter: None });
