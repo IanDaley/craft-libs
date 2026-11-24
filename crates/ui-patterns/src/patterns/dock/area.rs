@@ -714,6 +714,14 @@ fn show_area<P: Clone + Eq + Hash + Debug + Send + Sync + 'static>(
         edit.push(event);
     }
 
+    // A tab picked in an open flyout makes that panel the open one; without this, the flyout's body (driven by
+    // the open panel) never follows the tab the user clicked.
+    if open.is_some()
+        && report.picked.is_some()
+        && open.as_ref() != report.picked.as_ref()
+    {
+        report.flyout.push(EditEvent::set(Mixed::Same(open.clone()), report.picked.clone(), Arc::from("flyout"), None));
+    }
     let mut shown = open;
     for event in report.flyout.drain(..) {
         match flyout.as_mut() {
