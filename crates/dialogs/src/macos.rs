@@ -18,7 +18,7 @@ use std::ffi::c_void;
 use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSModalResponse, NSModalResponseAbort, NSModalResponseOK, NSOpenPanel, NSPanel, NSSavePanel, NSView};
+use objc2_app_kit::{NSApplication, NSModalResponse, NSModalResponseAbort, NSModalResponseOK, NSOpenPanel, NSPanel, NSSavePanel, NSView, NSWindow};
 use objc2_foundation::{NSArray, NSString, NSURL};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -27,6 +27,7 @@ use crate::{Answer, FileDialog, Kind, Reply};
 const NOT_MAIN: &str = "dialogs show from the main thread only";
 const NOT_RUNNING: &str = "the app isn't running yet, so the dialog can't be shown";
 const SAVE_NOT_SHOWN: &str = "the save panel couldn't be shown";
+const SAVE_NO_WINDOW: &str = "the window to show the save panel on isn't available";
 
 /// The free-standing panel a [`crate::Dialogs`] has on screen.
 pub(crate) enum Panel {
@@ -46,6 +47,17 @@ pub(crate) fn raise(panel: &Panel) {
     if window.isVisible() {
         window.makeKeyAndOrderFront(None);
     }
+}
+
+/// The window a save sheet attaches to, read from `parent`'s AppKit view.
+#[allow(unsafe_code)]
+fn parent_window<W: HasWindowHandle>(parent: Option<&W>) -> Option<Retained<NSWindow>> {
+    let parent = parent?;
+    let RawWindowHandle::AppKit(handle) = parent.window_handle().ok()?.as_raw() else { return None };
+    // SAFETY: the pointer is the window's content view, which AppKit keeps alive while the window
+    // is open, and winit hands out the handle only while it is.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    view.window()
 }
 
 /// The parent a sheet can be shown on, or why there is none.
@@ -124,16 +136,23 @@ pub(crate) fn show_panel(d: &FileDialog, reply: Reply) -> Option<Panel> {
 
 /// Shows a Save panel that doesn't block the window and answers through `reply` when it closes.
 /// AppKit calls the completion handler on the main thread.
-pub(crate) fn show_save_panel(d: &FileDialog, reply: Reply) -> Option<Panel> {
+pub(crate) fn show_save_panel<W: HasWindowHandle>(d: &FileDialog, parent: Option<&W>, reply: Reply) -> Option<Panel> {
     let Some(mtm) = MainThreadMarker::new() else {
+        log::warn!("macOS save panel: not the main thread");
         reply.send(Answer::Unavailable(NOT_MAIN.into()));
         return None;
     };
     // Begun before the app runs, the panel would never show or answer.
     if !NSApplication::sharedApplication(mtm).isRunning() {
+        log::warn!("macOS save panel: the app isn't running yet");
         reply.send(Answer::Unavailable(NOT_RUNNING.into()));
         return None;
     }
+    let Some(window) = parent_window(parent) else {
+        log::warn!("macOS save panel: no window to attach the sheet to");
+        reply.send(Answer::Unavailable(SAVE_NO_WINDOW.into()));
+        return None;
+    };
     // `+[NSSavePanel savePanel]` returned NULL on macOS 15.7 (#5980); `alloc`/`init` doesn't.
     let panel = NSSavePanel::new(mtm);
     panel.setCanCreateDirectories(true);
@@ -164,6 +183,7 @@ pub(crate) fn show_save_panel(d: &FileDialog, reply: Reply) -> Option<Panel> {
         let Some(reply) = reply.take() else { return };
         // Abort is the panel failing to display, not the user closing it.
         if response == NSModalResponseAbort {
+            log::warn!("macOS save panel: AppKit aborted the sheet");
             return reply.send(Answer::Unavailable(SAVE_NOT_SHOWN.into()));
         }
         if response != NSModalResponseOK {
@@ -174,6 +194,7 @@ pub(crate) fn show_save_panel(d: &FileDialog, reply: Reply) -> Option<Panel> {
             None => reply.send(Answer::Cancelled),
         }
     });
-    panel.beginWithCompletionHandler(&handler);
+    log::info!("macOS save panel: sheet on the app window, {} filter(s), name {:?}", d.filters.len(), d.file_name);
+    panel.beginSheetModalForWindow_completionHandler(&window, &handler);
     Some(Panel::Save(panel))
 }

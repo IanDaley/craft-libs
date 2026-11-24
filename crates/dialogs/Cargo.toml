@@ -38,6 +38,8 @@ block2 = "0.6.2"
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+# Why a save sheet did not show, when it did not.
+log = "0.4"
 
 # The Linux and BSD Save panel asks the desktop portal itself, which reports the file type picked.
 # The versions craft-platform already builds (zbus with async-io and blocking-api), so adopting the
@@ -58,5 +60,17 @@ screen-testing = ["ui", "craft-ui/testing"]
 [dev-dependencies]
 craft-ui = { workspace = true, features = ["suite"] }
 
-[lints]
-workspace = true
+# The workspace's lints, with `unsafe_code` at `deny` instead of `forbid`: `macos.rs` reads the
+# dialog parent's `NSView` and `NSWindow` to attach a save sheet, which has no safe API, and a
+# module-level `allow` cannot override `forbid`. Every other lint is the workspace's.
+[lints.rust]
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(craft_pdf_unicode_fixtures)"] }
+[lints.cargo]
+unused_workspace_dependencies = "allow"
+[lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"

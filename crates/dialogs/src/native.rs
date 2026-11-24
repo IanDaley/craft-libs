@@ -64,12 +64,11 @@ pub(crate) fn show<W: HasWindowHandle + HasDisplayHandle>(request: Request, pare
 fn show_file<W: HasWindowHandle + HasDisplayHandle>(d: FileDialog, parent: Option<&W>, reply: Reply) -> Shown {
     #[cfg(target_os = "macos")]
     {
-        // Free-standing panels, as native apps show them. rfd's sheet never appeared on macOS 27,
-        // so Save no longer asks it.
-        let _ = parent;
+        // Open and Folder are free-standing panels; Save is a sheet on the app's window. rfd's
+        // sheet never appeared on macOS 27, so none of them asks it.
         match d.kind {
             Kind::Open { .. } | Kind::Folder => Shown { panel: crate::macos::show_panel(&d, reply) },
-            Kind::Save => Shown { panel: crate::macos::show_save_panel(&d, reply) },
+            Kind::Save => Shown { panel: crate::macos::show_save_panel(&d, parent, reply) },
         }
     }
     #[cfg(not(target_os = "macos"))]
